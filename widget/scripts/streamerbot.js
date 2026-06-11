@@ -15,9 +15,21 @@ if (configs.streamerBotSettings.password) {
 
 const client = new StreamerbotClient(clientOptions);
 
-function onConnect() {
+async function onConnect() {
 	const existing = document.getElementById("connection-error");
 	if (existing) existing.remove();
+	await refreshTimerState();
+}
+
+async function refreshTimerState() {
+	const response = await client.getGlobal("timer-status", true);
+	if (response.status !== "ok" || !response.variable?.value) return;
+
+	try {
+		onStreamerbotData(JSON.parse(response.variable.value));
+	} catch (err) {
+		console.error("Failed to parse timer-status global:", err);
+	}
 }
 
 function onDisconnect() {

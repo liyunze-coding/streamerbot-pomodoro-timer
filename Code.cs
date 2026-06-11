@@ -103,7 +103,8 @@ public class PomodoroEngine
                 return new PomodoroResponse(false, "❌ The timer is already paused.");
             paused = true;
             remainingMsAtPause = Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
-            StopTimer();
+            StopPhaseTimer();
+            EnsureStatusTick();
             broadcast("pause", GetSnapshot());
             return new PomodoroResponse(true, $"⏸️ Timer paused with {FormatRemaining(remainingMsAtPause)} left in {PhaseLabel(phase)}.");
         }
@@ -131,11 +132,12 @@ public class PomodoroEngine
             if (!IsActive())
                 return new PomodoroResponse(false, "❌ No pomodoro session is running.");
             const double skipRemainingMs = 1000;
-            StopTimer();
             if (paused)
             {
+                StopPhaseTimer();
                 remainingMsAtPause = skipRemainingMs;
                 phaseEndsAt = DateTime.MinValue;
+                EnsureStatusTick();
             }
             else
             {
@@ -157,6 +159,7 @@ public class PomodoroEngine
             currentPomodoro = 0;
             paused = false;
             broadcast("stop", GetSnapshot());
+            persistTimerStatus(GetSnapshot());
             return new PomodoroResponse(true, "🛑 Pomodoro session stopped.");
         }
     }
@@ -327,13 +330,14 @@ public class PomodoroEngine
         phaseEndsAt = DateTime.MinValue;
         currentPhaseDurationMs = 0;
         onTimerEnd();
+        persistTimerStatus(GetSnapshot());
     }
 
 #endregion
 #region Timer
     private void ScheduleTimer(double durationMs)
     {
-        StopTimer();
+        StopPhaseTimer();
         phaseEndsAt = DateTime.UtcNow.AddMilliseconds(durationMs);
         phaseTimer = new System.Timers.Timer(Math.Max(1, durationMs));
         phaseTimer.AutoReset = false;
@@ -342,15 +346,26 @@ public class PomodoroEngine
         StartStatusTick();
     }
 
-    private void StopTimer()
+    private void StopPhaseTimer()
     {
-        StopStatusTick();
         if (phaseTimer != null)
         {
             phaseTimer.Stop();
             phaseTimer.Dispose();
             phaseTimer = null;
         }
+    }
+
+    private void StopTimer()
+    {
+        StopPhaseTimer();
+        StopStatusTick();
+    }
+
+    private void EnsureStatusTick()
+    {
+        if (statusTickTimer == null)
+            StartStatusTick();
     }
 
     private void StartStatusTick()
@@ -377,7 +392,7 @@ public class PomodoroEngine
     {
         lock (stateLock)
         {
-            if (!IsActive() || paused)
+            if (!IsActive())
             {
                 StopStatusTick();
                 return;
@@ -510,9 +525,7 @@ public class CPHInline
 
     private void Broadcast(string eventName, object state)
     {
-        string json = SerializeTimerStatus(eventName, state);
-        CPH.WebsocketBroadcastJson(json);
-        CPH.SetGlobalVar("timer-status", json, true);
+        CPH.WebsocketBroadcastJson(SerializeTimerStatus(eventName, state));
     }
 
     private void PersistTimerStatus(object state)
