@@ -8,6 +8,17 @@ const countEl = document.getElementById("pomodoro-count");
 let state = null;
 let tickInterval = null;
 
+function getReadyState() {
+	return {
+		phase: "work",
+		pomodoro: 0,
+		totalPomodoros: configs.settings.totalPomodoros,
+		paused: false,
+		running: false,
+		remainingMs: configs.settings.workMinutes * 60 * 1000,
+	};
+}
+
 function formatTime(ms) {
 	const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
 	const hours = Math.floor(totalSeconds / 3600);
@@ -33,27 +44,20 @@ function getRemainingMs(currentState) {
 }
 
 function render() {
-	if (!state) {
-		timerEl.textContent = "00:00";
-		phaseEl.textContent = phaseLabels.idle;
-		countEl.textContent = "Session 0/0";
-		document.body.dataset.phase = "idle";
-		delete document.body.dataset.paused;
-		return;
-	}
+	const displayState = state ?? getReadyState();
 
-	timerEl.textContent = formatTime(getRemainingMs(state));
+	timerEl.textContent = formatTime(getRemainingMs(displayState));
 
-	let label = phaseLabels[state.phase] ?? state.phase;
-	if (state.paused && state.running) {
+	let label = phaseLabels[displayState.phase] ?? displayState.phase;
+	if (displayState.paused && displayState.running) {
 		label += " (Paused)";
 	}
 
 	phaseEl.textContent = label;
-	countEl.textContent = `Session ${state.pomodoro}/${state.totalPomodoros}`;
-	document.body.dataset.phase = state.phase;
+	countEl.textContent = `Session ${displayState.pomodoro}/${displayState.totalPomodoros}`;
+	document.body.dataset.phase = displayState.phase;
 
-	if (state.paused) {
+	if (displayState.paused) {
 		document.body.dataset.paused = "true";
 	} else {
 		delete document.body.dataset.paused;

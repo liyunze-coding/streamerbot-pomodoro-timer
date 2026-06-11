@@ -23,7 +23,6 @@ public class PomodoroConfig
 #region Data Models
 public enum PomodoroPhase
 {
-    Idle,
     Work,
     Break,
     LongBreak,
@@ -55,7 +54,7 @@ public class PomodoroEngine
     private System.Timers.Timer phaseTimer;
     private System.Timers.Timer statusTickTimer;
     private PomodoroConfig config = new PomodoroConfig();
-    private PomodoroPhase phase = PomodoroPhase.Idle;
+    private PomodoroPhase phase = PomodoroPhase.Work;
     private int currentPomodoro = 0; // 1-based once running
     private bool paused = false;
     private DateTime phaseEndsAt = DateTime.MinValue;
@@ -75,6 +74,7 @@ public class PomodoroEngine
         this.onBreakStart = onBreakStart;
         this.onLongBreakStart = onLongBreakStart;
         this.onTimerEnd = onTimerEnd;
+        ResetToReady();
     }
 
 #region Public Commands
@@ -154,12 +154,8 @@ public class PomodoroEngine
         {
             if (!IsActive())
                 return new PomodoroResponse(false, "❌ No pomodoro session is running.");
-            StopTimer();
-            phase = PomodoroPhase.Idle;
-            currentPomodoro = 0;
-            paused = false;
+            ResetToReady();
             broadcast("stop", GetSnapshot());
-            persistTimerStatus(GetSnapshot());
             return new PomodoroResponse(true, "🛑 Pomodoro session stopped.");
         }
     }
@@ -226,7 +222,7 @@ public class PomodoroEngine
             {
                 if (phase == PomodoroPhase.Finished)
                     return new PomodoroResponse(true, "🎉 Pomodoro session complete!");
-                return new PomodoroResponse(true, "💤 No pomodoro session is running.");
+                return new PomodoroResponse(true, $"💤 Ready for work — {config.WorkMinutes} min (use !timer start).");
             }
             double remainingMs = paused
                 ? remainingMsAtPause
@@ -241,7 +237,8 @@ public class PomodoroEngine
 #region Phase Logic
     private bool IsActive()
     {
-        return phase == PomodoroPhase.Work || phase == PomodoroPhase.Break || phase == PomodoroPhase.LongBreak;
+        return currentPomodoro > 0
+            && (phase == PomodoroPhase.Work || phase == PomodoroPhase.Break || phase == PomodoroPhase.LongBreak);
     }
 
     private bool IsLongBreakDue()
@@ -320,6 +317,16 @@ public class PomodoroEngine
             currentPomodoro++;
             EnterPhase(PomodoroPhase.Work);
         }
+    }
+
+    private void ResetToReady()
+    {
+        StopTimer();
+        phase = PomodoroPhase.Work;
+        currentPomodoro = 0;
+        paused = false;
+        phaseEndsAt = DateTime.MinValue;
+        currentPhaseDurationMs = GetPhaseDurationMs(PomodoroPhase.Work);
     }
 
     private void Finish()
@@ -421,6 +428,8 @@ public class PomodoroEngine
             remainingMs = remainingMsAtPause;
         else if (IsActive())
             remainingMs = Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
+        else if (phase == PomodoroPhase.Work)
+            remainingMs = GetPhaseDurationMs(PomodoroPhase.Work);
         else
             remainingMs = 0;
         return new
@@ -454,7 +463,7 @@ public class PomodoroEngine
             case PomodoroPhase.Break: return "break";
             case PomodoroPhase.LongBreak: return "longBreak";
             case PomodoroPhase.Finished: return "finished";
-            default: return "idle";
+            default: return "work";
         }
     }
 
@@ -466,7 +475,7 @@ public class PomodoroEngine
             case PomodoroPhase.Break: return "break";
             case PomodoroPhase.LongBreak: return "long break";
             case PomodoroPhase.Finished: return "finished";
-            default: return "idle";
+            default: return "work";
         }
     }
 
@@ -481,6 +490,7 @@ public class PomodoroEngine
 #region Main Command Handler
 public class CPHInline
 {
+    private const string TimerStatusGlobalVar = "timer-status";
     private static PomodoroEngine engine;
     private static readonly object initLock = new object();
     public void Init()
@@ -490,6 +500,9 @@ public class CPHInline
             if (engine == null)
                 engine = new PomodoroEngine(Broadcast, PersistTimerStatus, OnWorkStart, OnBreakStart, OnLongBreakStart, OnTimerEnd);
         }
+
+        // Recreate timer-status if it was deleted from Streamer.bot globals.
+        EnsureTimerStatusGlobal(engine.GetSnapshot());
     }
 
 #region Events
@@ -526,11 +539,17 @@ public class CPHInline
     private void Broadcast(string eventName, object state)
     {
         CPH.WebsocketBroadcastJson(SerializeTimerStatus(eventName, state));
+        EnsureTimerStatusGlobal(state);
     }
 
     private void PersistTimerStatus(object state)
     {
-        CPH.SetGlobalVar("timer-status", SerializeTimerStatus("tick", state), true);
+        EnsureTimerStatusGlobal(state);
+    }
+
+    private void EnsureTimerStatusGlobal(object state)
+    {
+        CPH.SetGlobalVar(TimerStatusGlobalVar, SerializeTimerStatus("tick", state), true);
     }
 
     // Reads configuration from action arguments, falling back to PomodoroConfig defaults.

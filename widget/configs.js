@@ -9,7 +9,6 @@ const configs = (function () {
 	};
 
 	const phaseLabels = {
-		idle: "Idle",
 		work: "Work",
 		break: "Break",
 		longBreak: "Long Break",
@@ -18,6 +17,8 @@ const configs = (function () {
 
 	const settings = {
 		phaseLabels,
+		workMinutes: 50,
+		totalPomodoros: 5,
 	};
 
 	return {
