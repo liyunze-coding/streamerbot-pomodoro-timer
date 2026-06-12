@@ -25,8 +25,7 @@ public class PomodoroConfig
     public string EndSoundFilePath = "C:/Users/ryanl/Desktop/programming/javascript/browser_source/RythonDev-PomodoroTimer/sounds/break-started.mp3";
 
     // Pre-work-end ad break (fires once per work phase when remaining time crosses the threshold)
-    public bool EnablePreWorkEndAds = false;
-    public int PreWorkEndWarningMinutes = 3;
+    public bool EnablePreWorkEndAds = true;
     public int AdDurationSeconds = 180; // 30, 60, 90, 120, 150, or 180
     public string PreWorkEndActionId = "b8b06b77-5348-4c60-9699-093f3b26cc5c";
     public string PreBreakEndActionId = "e6d6ce65-db6c-4970-8e9e-ed3afb19c489";
@@ -188,8 +187,6 @@ public class PomodoroEngine
     {
         lock (stateLock)
         {
-            if (!IsActive())
-                return new PomodoroResponse(false, "❌ No pomodoro session is running.");
             if (totalPomodoros < 1)
                 return new PomodoroResponse(false, "❌ The goal must be at least 1 pomodoro.");
             if (totalPomodoros < currentPomodoro)
@@ -491,7 +488,7 @@ public class PomodoroEngine
             && config.AdDurationSeconds > 0
             && !preWorkEndWarningFired)
         {
-            double thresholdMs = TimeSpan.FromMinutes(config.PreWorkEndWarningMinutes).TotalMilliseconds;
+            double thresholdMs = TimeSpan.FromSeconds(config.AdDurationSeconds).TotalMilliseconds + 5000; // compensate for 5 seconds delay
             if (remainingMs <= thresholdMs)
             {
                 preWorkEndWarningFired = true;
@@ -500,7 +497,6 @@ public class PomodoroEngine
         }
 
         if ((phase == PomodoroPhase.Break || phase == PomodoroPhase.LongBreak)
-            && config.EnablePreBreakEndMessage
             && !preBreakEndWarningFired)
         {
             double thresholdMs = TimeSpan.FromSeconds(config.PreBreakEndWarningSeconds).TotalMilliseconds;
@@ -559,11 +555,8 @@ public class PomodoroEngine
                 noLastBreak = config.NoLastBreak,
                 browserSourceSound = config.BrowserSourceSound,
                 enablePreWorkEndAds = config.EnablePreWorkEndAds,
-                preWorkEndWarningMinutes = config.PreWorkEndWarningMinutes,
                 adDurationSeconds = config.AdDurationSeconds,
-                enablePreBreakEndMessage = config.EnablePreBreakEndMessage,
                 preBreakEndWarningSeconds = config.PreBreakEndWarningSeconds,
-                preBreakEndMessage = config.PreBreakEndMessage
             }
         };
     }
@@ -623,10 +616,10 @@ public class CPHInline
     private void OnWorkStart()
     {
         var config = engine.GetConfig();
-        if (!config.BrowserSourceSound)
-        {
-            CPH.PlaySound(config.WorkSoundFilePath);
-        }
+        // if (!config.BrowserSourceSound)
+        // {
+        //     CPH.PlaySound(config.WorkSoundFilePath);
+        // }
         
         CPH.RunActionById("ad25831a-6f84-4d5c-ab00-ec141d09a657");
     }
@@ -636,7 +629,10 @@ public class CPHInline
     {
         var config = engine.GetConfig();
         if (!config.BrowserSourceSound)
+        {
             CPH.PlaySound(config.BreakSoundFilePath);
+        }
+            
 
         CPH.RunActionById("58fdf247-faab-40c9-8651-0f8650801913");
     }
@@ -646,7 +642,9 @@ public class CPHInline
     {
         var config = engine.GetConfig();
         if (!config.BrowserSourceSound)
+        {
             CPH.PlaySound(config.LongBreakSoundFilePath);
+        }
 
         CPH.RunActionById("22aef312-66d1-4579-bc73-e6eb59743d5c");
     }
@@ -656,12 +654,14 @@ public class CPHInline
     {
         var config = engine.GetConfig();
         if (!config.BrowserSourceSound)
+        {
             CPH.PlaySound(config.EndSoundFilePath);
+        }
 
         CPH.RunActionById("49398044-2fdb-40b8-a953-cec60c22cce2");
     }
 
-    // Fired once per work phase when remaining time crosses preWorkEndWarningMinutes.
+    // Fired once per work phase when remaining time crosses ad duration.
     // Streamer.bot action receives adDurationSeconds (30–180, step 30).
     private void OnPreWorkEnd(int adDurationSeconds)
     {
@@ -677,15 +677,10 @@ public class CPHInline
     private void OnPreBreakEnd()
     {
         var config = engine.GetConfig();
-        string message = string.IsNullOrWhiteSpace(config.PreBreakEndMessage)
-            ? "Work is about to start"
-            : config.PreBreakEndMessage;
         
         if (string.IsNullOrWhiteSpace(config.PreBreakEndActionId))
             return;
-
-        CPH.SetArgument("preBreakEndMessage", message);
-        CPH.RunActionById(config.PreWorkEndActionId);
+        CPH.RunActionById(config.PreBreakEndActionId);
     }
 #endregion
 #region Platform Helpers
@@ -713,8 +708,8 @@ public class CPHInline
     // Reads configuration from action arguments, falling back to PomodoroConfig defaults.
     // Set these as arguments on the Streamer.bot action to configure:
     //   workMinutes, breakMinutes, longBreakMinutes, longBreakEvery, totalPomodoros, noLastBreak,
-    //   enablePreWorkEndAds, preWorkEndWarningMinutes, adDurationSeconds, PreWorkEndActionId,
-    //   enablePreBreakEndMessage, preBreakEndWarningSeconds, preBreakEndMessage
+    //   enablePreWorkEndAds, adDurationSeconds, PreWorkEndActionId,
+    //   preBreakEndWarningSeconds
     private PomodoroConfig LoadConfig()
     {
         var config = new PomodoroConfig();
@@ -740,18 +735,12 @@ public class CPHInline
             config.LongBreakSoundFilePath = longBreakSound;
         if (CPH.TryGetArg("enablePreWorkEndAds", out string enablePreWorkEndAds) && bool.TryParse(enablePreWorkEndAds, out bool preWorkAds))
             config.EnablePreWorkEndAds = preWorkAds;
-        if (CPH.TryGetArg("preWorkEndWarningMinutes", out string preWorkEndWarningMinutes) && int.TryParse(preWorkEndWarningMinutes, out int warnMinutes) && warnMinutes >= 0)
-            config.PreWorkEndWarningMinutes = warnMinutes;
         if (CPH.TryGetArg("adDurationSeconds", out string adDurationSeconds) && int.TryParse(adDurationSeconds, out int adSeconds))
             config.AdDurationSeconds = NormalizeAdDurationSeconds(adSeconds);
         if (CPH.TryGetArg("PreWorkEndActionId", out string PreWorkEndActionId) && !string.IsNullOrWhiteSpace(PreWorkEndActionId))
             config.PreWorkEndActionId = PreWorkEndActionId;
-        if (CPH.TryGetArg("enablePreBreakEndMessage", out string enablePreBreakEndMessage) && bool.TryParse(enablePreBreakEndMessage, out bool preBreakMsg))
-            config.EnablePreBreakEndMessage = preBreakMsg;
         if (CPH.TryGetArg("preBreakEndWarningSeconds", out string preBreakEndWarningSeconds) && int.TryParse(preBreakEndWarningSeconds, out int warnSeconds) && warnSeconds >= 0)
             config.PreBreakEndWarningSeconds = warnSeconds;
-        if (CPH.TryGetArg("preBreakEndMessage", out string preBreakEndMessage) && !string.IsNullOrWhiteSpace(preBreakEndMessage))
-            config.PreBreakEndMessage = preBreakEndMessage;
         return config;
     }
 
