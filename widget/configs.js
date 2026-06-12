@@ -19,6 +19,7 @@ const configs = (function () {
 		work: "../sounds/work-started.mp3",
 		break: "../sounds/break-started.mp3",
 		longBreak: "../sounds/break-started.mp3",
+		end: "../sounds/break-started.mp3",
 	};
 
 	const settings = {
