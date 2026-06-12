@@ -1,4 +1,3 @@
-const styles = configs.styles;
 const phaseLabels = configs.settings.phaseLabels;
 
 const timerEl = document.getElementById("timer");
@@ -7,6 +6,41 @@ const countEl = document.getElementById("pomodoro-count");
 
 let state = null;
 let tickInterval = null;
+
+const phaseSounds = Object.fromEntries(
+	Object.entries(configs.settings.sounds).map(([key, src]) => [
+		key,
+		Object.assign(new Audio(src), { preload: "auto" }),
+	]),
+);
+
+function playPhaseSound(phase) {
+	const soundKey =
+		phase === "finished"
+			? "end"
+			: phase === "longBreak"
+				? "longBreak"
+				: phase;
+
+	const audio = phaseSounds[soundKey];
+	if (!audio) return;
+
+	audio.currentTime = 0;
+	audio.play().catch((err) => console.warn("Sound play failed:", err));
+}
+
+function maybePlayPhaseSound(previousState, newState) {
+	if (!newState?.config?.browserSourceSound) return;
+
+	const previousPhase = previousState?.phase;
+	const phaseChanged =
+		previousPhase != null && previousPhase !== newState.phase;
+	const sessionStarted = !previousState?.running && newState.running;
+
+	if (!phaseChanged && !sessionStarted) return;
+
+	playPhaseSound(newState.phase);
+}
 
 function getReadyState() {
 	return {
@@ -76,9 +110,14 @@ function stopTick() {
 	}
 }
 
-function applyPomodoroState(newState) {
+function applyPomodoroState(newState, { silent = false } = {}) {
+	const previousState = state;
 	state = newState;
 	render();
+
+	if (!silent) {
+		maybePlayPhaseSound(previousState, newState);
+	}
 
 	if (state?.running && !state.paused) {
 		startTick();

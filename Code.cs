@@ -17,6 +17,12 @@ public class PomodoroConfig
     public int LongBreakEvery = 3; // every Nth pomodoro the break is a long break
     public int TotalPomodoros = 5; // pomodoros (work sessions) per full run
     public bool NoLastBreak = false; // true = finish right after the last work session, no final break
+    public bool BrowserSourceSound = true; // true = sound on browser source | false = sound on streamer.bot
+
+    public string WorkSoundFilePath = "C:/Users/ryanl/Desktop/programming/javascript/browser_source/RythonDev-PomodoroTimer/sounds/work-started.mp3";
+    public string BreakSoundFilePath = "C:/Users/ryanl/Desktop/programming/javascript/browser_source/RythonDev-PomodoroTimer/sounds/break-started.mp3";
+    public string LongBreakSoundFilePath = "C:/Users/ryanl/Desktop/programming/javascript/browser_source/RythonDev-PomodoroTimer/sounds/break-started.mp3";
+    public string EndSoundFilePath = "C:/Users/ryanl/Desktop/programming/javascript/browser_source/RythonDev-PomodoroTimer/sounds/break-started.mp3";
 }
 
 #endregion
@@ -198,18 +204,36 @@ public class PomodoroEngine
                 return new PomodoroResponse(false, "❌ No pomodoro session is running.");
             if (durationMs <= 0)
                 return new PomodoroResponse(false, "❌ Time must be greater than zero.");
-            currentPhaseDurationMs = durationMs;
-            if (paused)
-            {
-                remainingMsAtPause = durationMs;
-                phaseEndsAt = DateTime.MinValue;
-            }
-            else
-            {
-                ScheduleTimer(durationMs);
-            }
-            broadcast("setTime", GetSnapshot());
+            ApplyRemainingTime(durationMs, "setTime");
             return new PomodoroResponse(true, $"⏱️ Timer set to {FormatRemaining(durationMs)} in {PhaseLabel(phase)}.");
+        }
+    }
+
+    public PomodoroResponse AddTime(double deltaMs)
+    {
+        lock (stateLock)
+        {
+            if (!IsActive())
+                return new PomodoroResponse(false, "❌ No pomodoro session is running.");
+            if (deltaMs <= 0)
+                return new PomodoroResponse(false, "❌ Time must be greater than zero.");
+            double newRemainingMs = GetRemainingMs() + deltaMs;
+            ApplyRemainingTime(newRemainingMs, "addTime");
+            return new PomodoroResponse(true, $"⏱️ Added {FormatRemaining(deltaMs)} — {FormatRemaining(newRemainingMs)} left in {PhaseLabel(phase)}.");
+        }
+    }
+
+    public PomodoroResponse SubtractTime(double deltaMs)
+    {
+        lock (stateLock)
+        {
+            if (!IsActive())
+                return new PomodoroResponse(false, "❌ No pomodoro session is running.");
+            if (deltaMs <= 0)
+                return new PomodoroResponse(false, "❌ Time must be greater than zero.");
+            double newRemainingMs = Math.Max(1000, GetRemainingMs() - deltaMs);
+            ApplyRemainingTime(newRemainingMs, "subtractTime");
+            return new PomodoroResponse(true, $"⏱️ Subtracted {FormatRemaining(deltaMs)} — {FormatRemaining(newRemainingMs)} left in {PhaseLabel(phase)}.");
         }
     }
 
@@ -235,6 +259,28 @@ public class PomodoroEngine
 
 #endregion
 #region Phase Logic
+    private double GetRemainingMs()
+    {
+        if (paused)
+            return remainingMsAtPause;
+        return Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
+    }
+
+    private void ApplyRemainingTime(double durationMs, string eventName)
+    {
+        currentPhaseDurationMs = durationMs;
+        if (paused)
+        {
+            remainingMsAtPause = durationMs;
+            phaseEndsAt = DateTime.MinValue;
+        }
+        else
+        {
+            ScheduleTimer(durationMs);
+        }
+        broadcast(eventName, GetSnapshot());
+    }
+
     private bool IsActive()
     {
         return currentPomodoro > 0
@@ -421,6 +467,8 @@ public class PomodoroEngine
 
 #endregion
 #region State Snapshot
+    public PomodoroConfig GetConfig() => config;
+
     public object GetSnapshot()
     {
         double remainingMs;
@@ -450,7 +498,8 @@ public class PomodoroEngine
                 longBreakMinutes = config.LongBreakMinutes,
                 longBreakEvery = config.LongBreakEvery,
                 totalPomodoros = config.TotalPomodoros,
-                noLastBreak = config.NoLastBreak
+                noLastBreak = config.NoLastBreak,
+                browserSourceSound = config.BrowserSourceSound
             }
         };
     }
@@ -509,24 +558,42 @@ public class CPHInline
     // Fired when a work session starts (including pomodoro 1 on !timer start).
     private void OnWorkStart()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+        {
+            CPH.PlaySound(config.WorkSoundFilePath);
+        }
+        
         CPH.RunActionById("ad25831a-6f84-4d5c-ab00-ec141d09a657");
     }
 
     // Fired when a regular break starts.
     private void OnBreakStart()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+            CPH.PlaySound(config.BreakSoundFilePath);
+
         CPH.RunActionById("58fdf247-faab-40c9-8651-0f8650801913");
     }
 
     // Fired when a long break starts.
     private void OnLongBreakStart()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+            CPH.PlaySound(config.LongBreakSoundFilePath);
+
         CPH.RunActionById("22aef312-66d1-4579-bc73-e6eb59743d5c");
     }
 
     // Fired when the full pomodoro run completes (all pomodoros done).
     private void OnTimerEnd()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+            CPH.PlaySound(config.EndSoundFilePath);
+
         CPH.RunActionById("49398044-2fdb-40b8-a953-cec60c22cce2");
     }
 #endregion
@@ -570,6 +637,14 @@ public class CPHInline
             config.TotalPomodoros = total;
         if (CPH.TryGetArg("noLastBreak", out string noLastBreak) && bool.TryParse(noLastBreak, out bool noLast))
             config.NoLastBreak = noLast;
+        if (CPH.TryGetArg("browserSourceSound", out string browserSourceSound) && bool.TryParse(browserSourceSound, out bool browserSound))
+            config.BrowserSourceSound = browserSound;
+        if (CPH.TryGetArg("workSoundFilePath", out string workSound) && !string.IsNullOrWhiteSpace(workSound))
+            config.WorkSoundFilePath = workSound;
+        if (CPH.TryGetArg("breakSoundFilePath", out string breakSound) && !string.IsNullOrWhiteSpace(breakSound))
+            config.BreakSoundFilePath = breakSound;
+        if (CPH.TryGetArg("longBreakSoundFilePath", out string longBreakSound) && !string.IsNullOrWhiteSpace(longBreakSound))
+            config.LongBreakSoundFilePath = longBreakSound;
         return config;
     }
 
@@ -711,6 +786,32 @@ public class CPHInline
         }
 
         var response = engine.SetTime(durationMs);
+        Respond(response.Message);
+        return response.Success;
+    }
+
+    public bool AddTimeCommand()
+    {
+        if (!TryGetTimeInput(out double durationMs))
+        {
+            Respond("❌ Usage: !timer add <mm:ss> or <hh:mm:ss> (e.g. !timer add 5:00 or !timer add 1:05:00)");
+            return false;
+        }
+
+        var response = engine.AddTime(durationMs);
+        Respond(response.Message);
+        return response.Success;
+    }
+
+    public bool SubtractTimeCommand()
+    {
+        if (!TryGetTimeInput(out double durationMs))
+        {
+            Respond("❌ Usage: !timer sub <mm:ss> or <hh:mm:ss> (e.g. !timer sub 5:00 or !timer sub 1:05:00)");
+            return false;
+        }
+
+        var response = engine.SubtractTime(durationMs);
         Respond(response.Message);
         return response.Success;
     }

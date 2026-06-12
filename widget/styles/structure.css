@@ -1,3 +1,36 @@
+.connection-error {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 12px 24px;
+    border-radius: 8px;
+    background: #e53935;
+    color: #fff;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 9999;
+    max-width: calc(100% - 2rem);
+}
+
+.connection-error[hidden] {
+    display: none;
+}
+
+.connection-error__title {
+    font-size: 1.1rem;
+    font-weight: 700;
+}
+
+.connection-error__message {
+    font-size: 0.95rem;
+    font-weight: 400;
+    opacity: 0.95;
+}
+
 #main-container {
     width: 100%;
     height: 100vh;
