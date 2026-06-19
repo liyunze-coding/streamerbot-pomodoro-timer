@@ -9,15 +9,24 @@ const configs = (function () {
 	};
 
 	const phaseLabels = {
-		idle: "Idle",
 		work: "Work",
 		break: "Break",
 		longBreak: "Long Break",
 		finished: "Done",
 	};
 
+	const sounds = {
+		work: "../sounds/work-started.mp3",
+		break: "../sounds/break-started.mp3",
+		longBreak: "../sounds/break-started.mp3",
+		end: "../sounds/break-started.mp3",
+	};
+
 	const settings = {
 		phaseLabels,
+		sounds,
+		workMinutes: 50,
+		totalPomodoros: 5,
 	};
 
 	return {

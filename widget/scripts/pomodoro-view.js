@@ -1,4 +1,3 @@
-const styles = configs.styles;
 const phaseLabels = configs.settings.phaseLabels;
 
 const timerEl = document.getElementById("timer");
@@ -7,6 +6,52 @@ const countEl = document.getElementById("pomodoro-count");
 
 let state = null;
 let tickInterval = null;
+
+const phaseSounds = Object.fromEntries(
+	Object.entries(configs.settings.sounds).map(([key, src]) => [
+		key,
+		Object.assign(new Audio(src), { preload: "auto" }),
+	]),
+);
+
+function playPhaseSound(phase) {
+	const soundKey =
+		phase === "finished"
+			? "end"
+			: phase === "longBreak"
+				? "longBreak"
+				: phase;
+
+	const audio = phaseSounds[soundKey];
+	if (!audio) return;
+
+	audio.currentTime = 0;
+	audio.play().catch((err) => console.warn("Sound play failed:", err));
+}
+
+function maybePlayPhaseSound(previousState, newState) {
+	if (!newState?.config?.browserSourceSound) return;
+
+	const previousPhase = previousState?.phase;
+	const phaseChanged =
+		previousPhase != null && previousPhase !== newState.phase;
+	const sessionStarted = !previousState?.running && newState.running;
+
+	if (!phaseChanged && !sessionStarted) return;
+
+	playPhaseSound(newState.phase);
+}
+
+function getReadyState() {
+	return {
+		phase: "work",
+		pomodoro: 0,
+		totalPomodoros: configs.settings.totalPomodoros,
+		paused: false,
+		running: false,
+		remainingMs: configs.settings.workMinutes * 60 * 1000,
+	};
+}
 
 function formatTime(ms) {
 	const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
@@ -33,27 +78,20 @@ function getRemainingMs(currentState) {
 }
 
 function render() {
-	if (!state) {
-		timerEl.textContent = "00:00";
-		phaseEl.textContent = phaseLabels.idle;
-		countEl.textContent = "Session 0/0";
-		document.body.dataset.phase = "idle";
-		delete document.body.dataset.paused;
-		return;
-	}
+	const displayState = state ?? getReadyState();
 
-	timerEl.textContent = formatTime(getRemainingMs(state));
+	timerEl.textContent = formatTime(getRemainingMs(displayState));
 
-	let label = phaseLabels[state.phase] ?? state.phase;
-	if (state.paused && state.running) {
+	let label = phaseLabels[displayState.phase] ?? displayState.phase;
+	if (displayState.paused && displayState.running) {
 		label += " (Paused)";
 	}
 
 	phaseEl.textContent = label;
-	countEl.textContent = `Session ${state.pomodoro}/${state.totalPomodoros}`;
-	document.body.dataset.phase = state.phase;
+	countEl.textContent = `Session ${displayState.pomodoro}/${displayState.totalPomodoros}`;
+	document.body.dataset.phase = displayState.phase;
 
-	if (state.paused) {
+	if (displayState.paused) {
 		document.body.dataset.paused = "true";
 	} else {
 		delete document.body.dataset.paused;
@@ -72,9 +110,14 @@ function stopTick() {
 	}
 }
 
-function applyPomodoroState(newState) {
+function applyPomodoroState(newState, { silent = false } = {}) {
+	const previousState = state;
 	state = newState;
 	render();
+
+	if (!silent) {
+		maybePlayPhaseSound(previousState, newState);
+	}
 
 	if (state?.running && !state.paused) {
 		startTick();

@@ -16,14 +16,28 @@ public class PomodoroConfig
     public int LongBreakMinutes = 15;
     public int LongBreakEvery = 3; // every Nth pomodoro the break is a long break
     public int TotalPomodoros = 5; // pomodoros (work sessions) per full run
-    public bool NoLastBreak = false; // true = finish right after the last work session, no final break
+    public bool NoLastBreak = true; // true = finish right after the last work session, no final break
+    public bool BrowserSourceSound = true; // true = sound on browser source | false = sound on streamer.bot
+
+    public string WorkSoundFilePath = "";
+    public string BreakSoundFilePath = "";
+    public string LongBreakSoundFilePath = "";
+    public string EndSoundFilePath = "";
+
+    // Pre-work-end ad break (fires once per work phase when remaining time crosses the threshold)
+    public bool EnablePreWorkEndAds = true;
+    public int AdDurationSeconds = 180; // 30, 60, 90, 120, 150, or 180
+    public string PreWorkEndActionId = "b8b06b77-5348-4c60-9699-093f3b26cc5c";
+    public string PreBreakEndActionId = "e6d6ce65-db6c-4970-8e9e-ed3afb19c489";
+
+    // Pre-break-end action (fires once per break / long break phase)
+    public int PreBreakEndWarningSeconds = 30;
 }
 
 #endregion
 #region Data Models
 public enum PomodoroPhase
 {
-    Idle,
     Work,
     Break,
     LongBreak,
@@ -52,10 +66,14 @@ public class PomodoroEngine
     private readonly Action onBreakStart;
     private readonly Action onLongBreakStart;
     private readonly Action onTimerEnd;
+    private readonly Action<int> onPreWorkEnd;
+    private readonly Action onPreBreakEnd;
+    private bool preWorkEndWarningFired;
+    private bool preBreakEndWarningFired;
     private System.Timers.Timer phaseTimer;
     private System.Timers.Timer statusTickTimer;
     private PomodoroConfig config = new PomodoroConfig();
-    private PomodoroPhase phase = PomodoroPhase.Idle;
+    private PomodoroPhase phase = PomodoroPhase.Work;
     private int currentPomodoro = 0; // 1-based once running
     private bool paused = false;
     private DateTime phaseEndsAt = DateTime.MinValue;
@@ -67,7 +85,9 @@ public class PomodoroEngine
         Action onWorkStart,
         Action onBreakStart,
         Action onLongBreakStart,
-        Action onTimerEnd)
+        Action onTimerEnd,
+        Action<int> onPreWorkEnd,
+        Action onPreBreakEnd)
     {
         this.broadcast = broadcast;
         this.persistTimerStatus = persistTimerStatus;
@@ -75,6 +95,9 @@ public class PomodoroEngine
         this.onBreakStart = onBreakStart;
         this.onLongBreakStart = onLongBreakStart;
         this.onTimerEnd = onTimerEnd;
+        this.onPreWorkEnd = onPreWorkEnd;
+        this.onPreBreakEnd = onPreBreakEnd;
+        ResetToReady();
     }
 
 #region Public Commands
@@ -103,7 +126,8 @@ public class PomodoroEngine
                 return new PomodoroResponse(false, "❌ The timer is already paused.");
             paused = true;
             remainingMsAtPause = Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
-            StopTimer();
+            StopPhaseTimer();
+            EnsureStatusTick();
             broadcast("pause", GetSnapshot());
             return new PomodoroResponse(true, $"⏸️ Timer paused with {FormatRemaining(remainingMsAtPause)} left in {PhaseLabel(phase)}.");
         }
@@ -131,11 +155,12 @@ public class PomodoroEngine
             if (!IsActive())
                 return new PomodoroResponse(false, "❌ No pomodoro session is running.");
             const double skipRemainingMs = 1000;
-            StopTimer();
             if (paused)
             {
+                StopPhaseTimer();
                 remainingMsAtPause = skipRemainingMs;
                 phaseEndsAt = DateTime.MinValue;
+                EnsureStatusTick();
             }
             else
             {
@@ -152,12 +177,19 @@ public class PomodoroEngine
         {
             if (!IsActive())
                 return new PomodoroResponse(false, "❌ No pomodoro session is running.");
-            StopTimer();
-            phase = PomodoroPhase.Idle;
-            currentPomodoro = 0;
-            paused = false;
+            ResetToReady();
             broadcast("stop", GetSnapshot());
             return new PomodoroResponse(true, "🛑 Pomodoro session stopped.");
+        }
+    }
+
+    public PomodoroResponse Reset()
+    {
+        lock (stateLock)
+        {
+            ResetToReady();
+            broadcast("stop", GetSnapshot());
+            return new PomodoroResponse(true, "🔄 Pomodoro reset.");
         }
     }
 
@@ -165,14 +197,14 @@ public class PomodoroEngine
     {
         lock (stateLock)
         {
-            if (!IsActive())
-                return new PomodoroResponse(false, "❌ No pomodoro session is running.");
             if (totalPomodoros < 1)
                 return new PomodoroResponse(false, "❌ The goal must be at least 1 pomodoro.");
             if (totalPomodoros < currentPomodoro)
                 return new PomodoroResponse(false, $"❌ The goal can't be lower than the current pomodoro ({currentPomodoro}).");
             config.TotalPomodoros = totalPomodoros;
             broadcast("setGoal", GetSnapshot());
+            if (!IsActive())
+                return new PomodoroResponse(true, $"🎯 Goal set to {config.TotalPomodoros} pomodoros.");
             return new PomodoroResponse(true, $"🎯 Goal updated! Now on pomodoro {currentPomodoro}/{config.TotalPomodoros}.");
         }
     }
@@ -199,18 +231,36 @@ public class PomodoroEngine
                 return new PomodoroResponse(false, "❌ No pomodoro session is running.");
             if (durationMs <= 0)
                 return new PomodoroResponse(false, "❌ Time must be greater than zero.");
-            currentPhaseDurationMs = durationMs;
-            if (paused)
-            {
-                remainingMsAtPause = durationMs;
-                phaseEndsAt = DateTime.MinValue;
-            }
-            else
-            {
-                ScheduleTimer(durationMs);
-            }
-            broadcast("setTime", GetSnapshot());
+            ApplyRemainingTime(durationMs, "setTime");
             return new PomodoroResponse(true, $"⏱️ Timer set to {FormatRemaining(durationMs)} in {PhaseLabel(phase)}.");
+        }
+    }
+
+    public PomodoroResponse AddTime(double deltaMs)
+    {
+        lock (stateLock)
+        {
+            if (!IsActive())
+                return new PomodoroResponse(false, "❌ No pomodoro session is running.");
+            if (deltaMs <= 0)
+                return new PomodoroResponse(false, "❌ Time must be greater than zero.");
+            double newRemainingMs = GetRemainingMs() + deltaMs;
+            ApplyRemainingTime(newRemainingMs, "addTime");
+            return new PomodoroResponse(true, $"⏱️ Added {FormatRemaining(deltaMs)} — {FormatRemaining(newRemainingMs)} left in {PhaseLabel(phase)}.");
+        }
+    }
+
+    public PomodoroResponse SubtractTime(double deltaMs)
+    {
+        lock (stateLock)
+        {
+            if (!IsActive())
+                return new PomodoroResponse(false, "❌ No pomodoro session is running.");
+            if (deltaMs <= 0)
+                return new PomodoroResponse(false, "❌ Time must be greater than zero.");
+            double newRemainingMs = Math.Max(1000, GetRemainingMs() - deltaMs);
+            ApplyRemainingTime(newRemainingMs, "subtractTime");
+            return new PomodoroResponse(true, $"⏱️ Subtracted {FormatRemaining(deltaMs)} — {FormatRemaining(newRemainingMs)} left in {PhaseLabel(phase)}.");
         }
     }
 
@@ -223,7 +273,7 @@ public class PomodoroEngine
             {
                 if (phase == PomodoroPhase.Finished)
                     return new PomodoroResponse(true, "🎉 Pomodoro session complete!");
-                return new PomodoroResponse(true, "💤 No pomodoro session is running.");
+                return new PomodoroResponse(true, $"💤 Ready for work — {config.WorkMinutes} min (use !timer start).");
             }
             double remainingMs = paused
                 ? remainingMsAtPause
@@ -236,9 +286,32 @@ public class PomodoroEngine
 
 #endregion
 #region Phase Logic
+    private double GetRemainingMs()
+    {
+        if (paused)
+            return remainingMsAtPause;
+        return Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
+    }
+
+    private void ApplyRemainingTime(double durationMs, string eventName)
+    {
+        currentPhaseDurationMs = durationMs;
+        if (paused)
+        {
+            remainingMsAtPause = durationMs;
+            phaseEndsAt = DateTime.MinValue;
+        }
+        else
+        {
+            ScheduleTimer(durationMs);
+        }
+        broadcast(eventName, GetSnapshot());
+    }
+
     private bool IsActive()
     {
-        return phase == PomodoroPhase.Work || phase == PomodoroPhase.Break || phase == PomodoroPhase.LongBreak;
+        return currentPomodoro > 0
+            && (phase == PomodoroPhase.Work || phase == PomodoroPhase.Break || phase == PomodoroPhase.LongBreak);
     }
 
     private bool IsLongBreakDue()
@@ -248,6 +321,8 @@ public class PomodoroEngine
 
     private void EnterPhase(PomodoroPhase newPhase)
     {
+        preWorkEndWarningFired = false;
+        preBreakEndWarningFired = false;
         phase = newPhase;
         currentPhaseDurationMs = GetPhaseDurationMs(newPhase);
         if (paused)
@@ -319,6 +394,18 @@ public class PomodoroEngine
         }
     }
 
+    private void ResetToReady()
+    {
+        StopTimer();
+        phase = PomodoroPhase.Work;
+        currentPomodoro = 0;
+        paused = false;
+        phaseEndsAt = DateTime.MinValue;
+        currentPhaseDurationMs = GetPhaseDurationMs(PomodoroPhase.Work);
+        preWorkEndWarningFired = false;
+        preBreakEndWarningFired = false;
+    }
+
     private void Finish()
     {
         StopTimer();
@@ -327,13 +414,14 @@ public class PomodoroEngine
         phaseEndsAt = DateTime.MinValue;
         currentPhaseDurationMs = 0;
         onTimerEnd();
+        persistTimerStatus(GetSnapshot());
     }
 
 #endregion
 #region Timer
     private void ScheduleTimer(double durationMs)
     {
-        StopTimer();
+        StopPhaseTimer();
         phaseEndsAt = DateTime.UtcNow.AddMilliseconds(durationMs);
         phaseTimer = new System.Timers.Timer(Math.Max(1, durationMs));
         phaseTimer.AutoReset = false;
@@ -342,15 +430,26 @@ public class PomodoroEngine
         StartStatusTick();
     }
 
-    private void StopTimer()
+    private void StopPhaseTimer()
     {
-        StopStatusTick();
         if (phaseTimer != null)
         {
             phaseTimer.Stop();
             phaseTimer.Dispose();
             phaseTimer = null;
         }
+    }
+
+    private void StopTimer()
+    {
+        StopPhaseTimer();
+        StopStatusTick();
+    }
+
+    private void EnsureStatusTick()
+    {
+        if (statusTickTimer == null)
+            StartStatusTick();
     }
 
     private void StartStatusTick()
@@ -377,12 +476,47 @@ public class PomodoroEngine
     {
         lock (stateLock)
         {
-            if (!IsActive() || paused)
+            if (!IsActive())
             {
                 StopStatusTick();
                 return;
             }
+            CheckPhaseEndWarnings();
             persistTimerStatus(GetSnapshot());
+        }
+    }
+
+    private void CheckPhaseEndWarnings()
+    {
+        if (paused)
+            return;
+
+        double remainingMs = GetRemainingMs();
+        if (remainingMs <= 0)
+            return;
+
+        if (phase == PomodoroPhase.Work
+            && config.EnablePreWorkEndAds
+            && config.AdDurationSeconds > 0
+            && !preWorkEndWarningFired)
+        {
+            double thresholdMs = TimeSpan.FromSeconds(config.AdDurationSeconds).TotalMilliseconds + 5000; // compensate for 5 seconds delay
+            if (remainingMs <= thresholdMs)
+            {
+                preWorkEndWarningFired = true;
+                onPreWorkEnd(config.AdDurationSeconds);
+            }
+        }
+
+        if ((phase == PomodoroPhase.Break || phase == PomodoroPhase.LongBreak)
+            && !preBreakEndWarningFired)
+        {
+            double thresholdMs = TimeSpan.FromSeconds(config.PreBreakEndWarningSeconds).TotalMilliseconds;
+            if (remainingMs <= thresholdMs)
+            {
+                preBreakEndWarningFired = true;
+                onPreBreakEnd();
+            }
         }
     }
 
@@ -399,6 +533,8 @@ public class PomodoroEngine
 
 #endregion
 #region State Snapshot
+    public PomodoroConfig GetConfig() => config;
+
     public object GetSnapshot()
     {
         double remainingMs;
@@ -406,6 +542,8 @@ public class PomodoroEngine
             remainingMs = remainingMsAtPause;
         else if (IsActive())
             remainingMs = Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
+        else if (phase == PomodoroPhase.Work)
+            remainingMs = GetPhaseDurationMs(PomodoroPhase.Work);
         else
             remainingMs = 0;
         return new
@@ -426,7 +564,11 @@ public class PomodoroEngine
                 longBreakMinutes = config.LongBreakMinutes,
                 longBreakEvery = config.LongBreakEvery,
                 totalPomodoros = config.TotalPomodoros,
-                noLastBreak = config.NoLastBreak
+                noLastBreak = config.NoLastBreak,
+                browserSourceSound = config.BrowserSourceSound,
+                enablePreWorkEndAds = config.EnablePreWorkEndAds,
+                adDurationSeconds = config.AdDurationSeconds,
+                preBreakEndWarningSeconds = config.PreBreakEndWarningSeconds,
             }
         };
     }
@@ -439,7 +581,7 @@ public class PomodoroEngine
             case PomodoroPhase.Break: return "break";
             case PomodoroPhase.LongBreak: return "longBreak";
             case PomodoroPhase.Finished: return "finished";
-            default: return "idle";
+            default: return "work";
         }
     }
 
@@ -451,7 +593,7 @@ public class PomodoroEngine
             case PomodoroPhase.Break: return "break";
             case PomodoroPhase.LongBreak: return "long break";
             case PomodoroPhase.Finished: return "finished";
-            default: return "idle";
+            default: return "work";
         }
     }
 
@@ -466,6 +608,7 @@ public class PomodoroEngine
 #region Main Command Handler
 public class CPHInline
 {
+    private const string TimerStatusGlobalVar = "timer-status";
     private static PomodoroEngine engine;
     private static readonly object initLock = new object();
     public void Init()
@@ -473,33 +616,83 @@ public class CPHInline
         lock (initLock)
         {
             if (engine == null)
-                engine = new PomodoroEngine(Broadcast, PersistTimerStatus, OnWorkStart, OnBreakStart, OnLongBreakStart, OnTimerEnd);
+                engine = new PomodoroEngine(Broadcast, PersistTimerStatus, OnWorkStart, OnBreakStart, OnLongBreakStart, OnTimerEnd, OnPreWorkEnd, OnPreBreakEnd);
         }
+
+        // Recreate timer-status if it was deleted from Streamer.bot globals.
+        EnsureTimerStatusGlobal(engine.GetSnapshot());
     }
 
 #region Events
     // Fired when a work session starts (including pomodoro 1 on !timer start).
     private void OnWorkStart()
     {
+        var config = engine.GetConfig();
+        // if (!config.BrowserSourceSound)
+        // {
+        //     CPH.PlaySound(config.WorkSoundFilePath);
+        // }
+        
         CPH.RunActionById("ad25831a-6f84-4d5c-ab00-ec141d09a657");
     }
 
     // Fired when a regular break starts.
     private void OnBreakStart()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+        {
+            CPH.PlaySound(config.BreakSoundFilePath);
+        }
+            
+
         CPH.RunActionById("58fdf247-faab-40c9-8651-0f8650801913");
     }
 
     // Fired when a long break starts.
     private void OnLongBreakStart()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+        {
+            CPH.PlaySound(config.LongBreakSoundFilePath);
+        }
+
         CPH.RunActionById("22aef312-66d1-4579-bc73-e6eb59743d5c");
     }
 
     // Fired when the full pomodoro run completes (all pomodoros done).
     private void OnTimerEnd()
     {
+        var config = engine.GetConfig();
+        if (!config.BrowserSourceSound)
+        {
+            CPH.PlaySound(config.EndSoundFilePath);
+        }
+
         CPH.RunActionById("49398044-2fdb-40b8-a953-cec60c22cce2");
+    }
+
+    // Fired once per work phase when remaining time crosses ad duration.
+    // Streamer.bot action receives adDurationSeconds (30–180, step 30).
+    private void OnPreWorkEnd(int adDurationSeconds)
+    {
+        var config = engine.GetConfig();
+        if (string.IsNullOrWhiteSpace(config.PreWorkEndActionId))
+            return;
+
+        CPH.SetArgument("adDurationSeconds", adDurationSeconds);
+        CPH.RunActionById(config.PreWorkEndActionId);
+    }
+
+    // Fired once per break phase when remaining time crosses preBreakEndWarningSeconds.
+    private void OnPreBreakEnd()
+    {
+        var config = engine.GetConfig();
+        
+        if (string.IsNullOrWhiteSpace(config.PreBreakEndActionId))
+            return;
+        CPH.RunActionById(config.PreBreakEndActionId);
     }
 #endregion
 #region Platform Helpers
@@ -510,22 +703,51 @@ public class CPHInline
 
     private void Broadcast(string eventName, object state)
     {
-        string json = SerializeTimerStatus(eventName, state);
-        CPH.WebsocketBroadcastJson(json);
-        CPH.SetGlobalVar("timer-status", json, true);
+        CPH.WebsocketBroadcastJson(SerializeTimerStatus(eventName, state));
+        EnsureTimerStatusGlobal(state);
     }
 
     private void PersistTimerStatus(object state)
     {
-        CPH.SetGlobalVar("timer-status", SerializeTimerStatus("tick", state), true);
+        EnsureTimerStatusGlobal(state);
+    }
+
+    private void EnsureTimerStatusGlobal(object state)
+    {
+        CPH.SetGlobalVar(TimerStatusGlobalVar, SerializeTimerStatus("tick", state), true);
     }
 
     // Reads configuration from action arguments, falling back to PomodoroConfig defaults.
     // Set these as arguments on the Streamer.bot action to configure:
-    //   workMinutes, breakMinutes, longBreakMinutes, longBreakEvery, totalPomodoros, noLastBreak
-    private PomodoroConfig LoadConfig()
+    //   workMinutes, breakMinutes, longBreakMinutes, longBreakEvery, totalPomodoros, noLastBreak,
+    //   enablePreWorkEndAds, adDurationSeconds, PreWorkEndActionId,
+    //   preBreakEndWarningSeconds
+    private static PomodoroConfig CopyConfig(PomodoroConfig source)
     {
-        var config = new PomodoroConfig();
+        return new PomodoroConfig
+        {
+            WorkMinutes = source.WorkMinutes,
+            BreakMinutes = source.BreakMinutes,
+            LongBreakMinutes = source.LongBreakMinutes,
+            LongBreakEvery = source.LongBreakEvery,
+            TotalPomodoros = source.TotalPomodoros,
+            NoLastBreak = source.NoLastBreak,
+            BrowserSourceSound = source.BrowserSourceSound,
+            WorkSoundFilePath = source.WorkSoundFilePath,
+            BreakSoundFilePath = source.BreakSoundFilePath,
+            LongBreakSoundFilePath = source.LongBreakSoundFilePath,
+            EndSoundFilePath = source.EndSoundFilePath,
+            EnablePreWorkEndAds = source.EnablePreWorkEndAds,
+            AdDurationSeconds = source.AdDurationSeconds,
+            PreWorkEndActionId = source.PreWorkEndActionId,
+            PreBreakEndActionId = source.PreBreakEndActionId,
+            PreBreakEndWarningSeconds = source.PreBreakEndWarningSeconds,
+        };
+    }
+
+    private PomodoroConfig LoadConfig(PomodoroConfig baseConfig = null)
+    {
+        var config = CopyConfig(baseConfig ?? new PomodoroConfig());
         if (CPH.TryGetArg("workMinutes", out string workMinutes) && int.TryParse(workMinutes, out int work) && work > 0)
             config.WorkMinutes = work;
         if (CPH.TryGetArg("breakMinutes", out string breakMinutes) && int.TryParse(breakMinutes, out int brk) && brk > 0)
@@ -538,7 +760,32 @@ public class CPHInline
             config.TotalPomodoros = total;
         if (CPH.TryGetArg("noLastBreak", out string noLastBreak) && bool.TryParse(noLastBreak, out bool noLast))
             config.NoLastBreak = noLast;
+        if (CPH.TryGetArg("browserSourceSound", out string browserSourceSound) && bool.TryParse(browserSourceSound, out bool browserSound))
+            config.BrowserSourceSound = browserSound;
+        if (CPH.TryGetArg("workSoundFilePath", out string workSound) && !string.IsNullOrWhiteSpace(workSound))
+            config.WorkSoundFilePath = workSound;
+        if (CPH.TryGetArg("breakSoundFilePath", out string breakSound) && !string.IsNullOrWhiteSpace(breakSound))
+            config.BreakSoundFilePath = breakSound;
+        if (CPH.TryGetArg("longBreakSoundFilePath", out string longBreakSound) && !string.IsNullOrWhiteSpace(longBreakSound))
+            config.LongBreakSoundFilePath = longBreakSound;
+        if (CPH.TryGetArg("enablePreWorkEndAds", out string enablePreWorkEndAds) && bool.TryParse(enablePreWorkEndAds, out bool preWorkAds))
+            config.EnablePreWorkEndAds = preWorkAds;
+        if (CPH.TryGetArg("adDurationSeconds", out string adDurationSeconds) && int.TryParse(adDurationSeconds, out int adSeconds))
+            config.AdDurationSeconds = NormalizeAdDurationSeconds(adSeconds);
+        if (CPH.TryGetArg("PreWorkEndActionId", out string PreWorkEndActionId) && !string.IsNullOrWhiteSpace(PreWorkEndActionId))
+            config.PreWorkEndActionId = PreWorkEndActionId;
+        if (CPH.TryGetArg("preBreakEndWarningSeconds", out string preBreakEndWarningSeconds) && int.TryParse(preBreakEndWarningSeconds, out int warnSeconds) && warnSeconds >= 0)
+            config.PreBreakEndWarningSeconds = warnSeconds;
         return config;
+    }
+
+    // Ad duration must be 0 (disabled) or 30–180 in 30-second steps.
+    private static int NormalizeAdDurationSeconds(int seconds)
+    {
+        if (seconds <= 0)
+            return 0;
+        seconds = Math.Min(180, Math.Max(30, seconds));
+        return ((seconds + 15) / 30) * 30;
     }
 
     private void Respond(string message)
@@ -611,7 +858,7 @@ public class CPHInline
 #region Commands
     public bool StartCommand()
     {
-        var response = engine.Start(LoadConfig());
+        var response = engine.Start(LoadConfig(engine.GetConfig()));
         Respond(response.Message);
         return response.Success;
     }
@@ -640,6 +887,13 @@ public class CPHInline
     public bool StopCommand()
     {
         var response = engine.Stop();
+        Respond(response.Message);
+        return response.Success;
+    }
+
+    public bool ResetCommand()
+    {
+        var response = engine.Reset();
         Respond(response.Message);
         return response.Success;
     }
@@ -679,6 +933,32 @@ public class CPHInline
         }
 
         var response = engine.SetTime(durationMs);
+        Respond(response.Message);
+        return response.Success;
+    }
+
+    public bool AddTimeCommand()
+    {
+        if (!TryGetTimeInput(out double durationMs))
+        {
+            Respond("❌ Usage: !timer add <mm:ss> or <hh:mm:ss> (e.g. !timer add 5:00 or !timer add 1:05:00)");
+            return false;
+        }
+
+        var response = engine.AddTime(durationMs);
+        Respond(response.Message);
+        return response.Success;
+    }
+
+    public bool SubtractTimeCommand()
+    {
+        if (!TryGetTimeInput(out double durationMs))
+        {
+            Respond("❌ Usage: !timer sub <mm:ss> or <hh:mm:ss> (e.g. !timer sub 5:00 or !timer sub 1:05:00)");
+            return false;
+        }
+
+        var response = engine.SubtractTime(durationMs);
         Respond(response.Message);
         return response.Success;
     }
