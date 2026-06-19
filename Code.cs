@@ -628,12 +628,12 @@ public class CPHInline
     private void OnWorkStart()
     {
         var config = engine.GetConfig();
-        // if (!config.BrowserSourceSound)
-        // {
-        //     CPH.PlaySound(config.WorkSoundFilePath);
-        // }
+        if (!config.BrowserSourceSound)
+        {
+            CPH.PlaySound(config.WorkSoundFilePath);
+        }
         
-        CPH.RunActionById("ad25831a-6f84-4d5c-ab00-ec141d09a657");
+        CPH.RunActionById("3631a33a-25d7-46fb-a134-5b2ba18ccc13");
     }
 
     // Fired when a regular break starts.
