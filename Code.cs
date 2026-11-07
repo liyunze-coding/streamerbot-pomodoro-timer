@@ -70,13 +70,13 @@ public class PomodoroEngine
     private readonly Action onPreBreakEnd;
     private bool preWorkEndWarningFired;
     private bool preBreakEndWarningFired;
-    private System.Timers.Timer phaseTimer;
     private System.Timers.Timer statusTickTimer;
     private PomodoroConfig config = new PomodoroConfig();
     private PomodoroPhase phase = PomodoroPhase.Work;
     private int currentPomodoro = 0; // 1-based once running
     private bool paused = false;
     private DateTime phaseEndsAt = DateTime.MinValue;
+    private DateTime phaseStartedAtUtc = DateTime.MinValue;
     private double remainingMsAtPause = 0;
     private double currentPhaseDurationMs = 0;
     public PomodoroEngine(
@@ -126,7 +126,7 @@ public class PomodoroEngine
                 return new PomodoroResponse(false, "❌ The timer is already paused.");
             paused = true;
             remainingMsAtPause = Math.Max(0, (phaseEndsAt - DateTime.UtcNow).TotalMilliseconds);
-            StopPhaseTimer();
+            phaseEndsAt = DateTime.MinValue;
             EnsureStatusTick();
             broadcast("pause", GetSnapshot());
             return new PomodoroResponse(true, $"⏸️ Timer paused with {FormatRemaining(remainingMsAtPause)} left in {PhaseLabel(phase)}.");
@@ -157,7 +157,6 @@ public class PomodoroEngine
             const double skipRemainingMs = 1000;
             if (paused)
             {
-                StopPhaseTimer();
                 remainingMsAtPause = skipRemainingMs;
                 phaseEndsAt = DateTime.MinValue;
                 EnsureStatusTick();
@@ -324,6 +323,7 @@ public class PomodoroEngine
         preWorkEndWarningFired = false;
         preBreakEndWarningFired = false;
         phase = newPhase;
+        phaseStartedAtUtc = DateTime.UtcNow;
         currentPhaseDurationMs = GetPhaseDurationMs(newPhase);
         if (paused)
         {
@@ -396,11 +396,12 @@ public class PomodoroEngine
 
     private void ResetToReady()
     {
-        StopTimer();
+        StopStatusTick();
         phase = PomodoroPhase.Work;
         currentPomodoro = 0;
         paused = false;
         phaseEndsAt = DateTime.MinValue;
+        phaseStartedAtUtc = DateTime.MinValue;
         currentPhaseDurationMs = GetPhaseDurationMs(PomodoroPhase.Work);
         preWorkEndWarningFired = false;
         preBreakEndWarningFired = false;
@@ -408,10 +409,12 @@ public class PomodoroEngine
 
     private void Finish()
     {
-        StopTimer();
+        // The status tick stops itself on the next callback. Disposing it here
+        // can run from inside that callback.
         phase = PomodoroPhase.Finished;
         paused = false;
         phaseEndsAt = DateTime.MinValue;
+        phaseStartedAtUtc = DateTime.UtcNow;
         currentPhaseDurationMs = 0;
         onTimerEnd();
         persistTimerStatus(GetSnapshot());
@@ -419,31 +422,12 @@ public class PomodoroEngine
 
 #endregion
 #region Timer
+    // phaseEndsAt is the only deadline. A 1s tick compares it to UtcNow, so the
+    // session keeps running when the OBS browser source is hidden or closed.
     private void ScheduleTimer(double durationMs)
     {
-        StopPhaseTimer();
         phaseEndsAt = DateTime.UtcNow.AddMilliseconds(durationMs);
-        phaseTimer = new System.Timers.Timer(Math.Max(1, durationMs));
-        phaseTimer.AutoReset = false;
-        phaseTimer.Elapsed += (sender, e) => OnPhaseElapsed();
-        phaseTimer.Start();
-        StartStatusTick();
-    }
-
-    private void StopPhaseTimer()
-    {
-        if (phaseTimer != null)
-        {
-            phaseTimer.Stop();
-            phaseTimer.Dispose();
-            phaseTimer = null;
-        }
-    }
-
-    private void StopTimer()
-    {
-        StopPhaseTimer();
-        StopStatusTick();
+        EnsureStatusTick();
     }
 
     private void EnsureStatusTick()
@@ -454,8 +438,9 @@ public class PomodoroEngine
 
     private void StartStatusTick()
     {
-        StopStatusTick();
-        statusTickTimer = new System.Timers.Timer(1000);
+        if (statusTickTimer != null)
+            return;
+        statusTickTimer = new System.Timers.Timer(250);
         statusTickTimer.AutoReset = true;
         statusTickTimer.Elapsed += (sender, e) => OnStatusTick();
         statusTickTimer.Start();
@@ -472,18 +457,33 @@ public class PomodoroEngine
         }
     }
 
+    private int ticksSincePersist;
+
     private void OnStatusTick()
     {
+        bool stopTick = false;
         lock (stateLock)
         {
             if (!IsActive())
             {
-                StopStatusTick();
-                return;
+                stopTick = true;
             }
-            CheckPhaseEndWarnings();
-            persistTimerStatus(GetSnapshot());
+            else
+            {
+                // Warnings use the phase we're still in. Completing first would skip them.
+                CheckPhaseEndWarnings();
+                CompletePhaseIfDue();
+                if (!IsActive())
+                    stopTick = true;
+                else if (++ticksSincePersist >= 4)
+                {
+                    ticksSincePersist = 0;
+                    persistTimerStatus(GetSnapshot());
+                }
+            }
         }
+        if (stopTick)
+            StopStatusTick();
     }
 
     private void CheckPhaseEndWarnings()
@@ -520,15 +520,15 @@ public class PomodoroEngine
         }
     }
 
-    private void OnPhaseElapsed()
+    private void CompletePhaseIfDue()
     {
-        lock (stateLock)
-        {
-            if (!IsActive() || paused)
-                return;
-            AdvancePhase();
-            broadcast(phase == PomodoroPhase.Finished ? "finish" : "phaseChange", GetSnapshot());
-        }
+        if (!IsActive() || paused || phaseEndsAt == DateTime.MinValue)
+            return;
+        if (DateTime.UtcNow < phaseEndsAt)
+            return;
+
+        AdvancePhase();
+        broadcast(phase == PomodoroPhase.Finished ? "finish" : "phaseChange", GetSnapshot());
     }
 
 #endregion
@@ -555,6 +555,9 @@ public class PomodoroEngine
             running = IsActive(),
             // epoch ms the current phase ends at; null while paused/inactive (use remainingMs instead)
             endsAt = (!paused && IsActive()) ? (long?)new DateTimeOffset(phaseEndsAt).ToUnixTimeMilliseconds() : null,
+            // epoch ms this phase started; the widget uses it to ignore stale events after OBS unhides the browser source
+            phaseStartedAt = phaseStartedAtUtc == DateTime.MinValue ? (long?)null : (long?)new DateTimeOffset(phaseStartedAtUtc).ToUnixTimeMilliseconds(),
+            asOf = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             remainingMs = (long)remainingMs,
             phaseDurationMs = (long)currentPhaseDurationMs,
             config = new

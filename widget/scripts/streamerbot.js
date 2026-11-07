@@ -20,21 +20,29 @@ if (configs.streamerBotSettings.password) {
 
 const client = new StreamerbotClient(clientOptions);
 
+let statePoll = null;
+
 async function onConnect() {
 	hideConnectionError();
 	await refreshTimerState();
+	if (!statePoll) statePoll = setInterval(refreshTimerState, 1000);
 }
 
 async function refreshTimerState() {
-	const response = await client.getGlobal("timer-status", true);
-	if (response.status !== "ok" || !response.variable?.value) return;
-
 	try {
-		onStreamerbotData(JSON.parse(response.variable.value), { silent: true });
+		const response = await client.getGlobal("timer-status", true);
+		if (response.status !== "ok" || !response.variable?.value) return;
+		onStreamerbotData(JSON.parse(response.variable.value));
 	} catch (err) {
-		console.error("Failed to parse timer-status global:", err);
+		if (err instanceof SyntaxError) {
+			console.error("Failed to parse timer-status global:", err);
+		}
 	}
 }
+
+document.addEventListener("visibilitychange", () => {
+	if (!document.hidden) refreshTimerState();
+});
 
 function onDisconnect() {
 	showConnectionError("Unable to connect to Streamer.bot");
@@ -61,7 +69,7 @@ function hideConnectionError() {
 
 client.on("General.Custom", ({ _event, data }) => onStreamerbotData(data));
 
-function onStreamerbotData(data, { silent = false } = {}) {
+function onStreamerbotData(data) {
 	if (data?.source !== POMODORO_SOURCE || !data.state) return;
-	applyPomodoroState(data.state, { silent });
+	applyPomodoroState(data.state);
 }

@@ -25,6 +25,8 @@ const configs = (function () {
 	const settings = {
 		phaseLabels,
 		sounds,
+		// true = play phase sounds in the browser source, false = stay silent
+		browserSourceSound: false,
 		workMinutes: 50,
 		totalPomodoros: 5,
 	};

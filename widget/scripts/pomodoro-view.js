@@ -4,8 +4,12 @@ const timerEl = document.getElementById("timer");
 const phaseEl = document.getElementById("phase-label");
 const countEl = document.getElementById("pomodoro-count");
 
+const PHASE_SOUND_GRACE_MS = 2500;
+
 let state = null;
 let tickInterval = null;
+let lastAsOf = 0;
+let lastPlayedPhaseStart = null;
 
 const phaseSounds = Object.fromEntries(
 	Object.entries(configs.settings.sounds).map(([key, src]) => [
@@ -29,16 +33,21 @@ function playPhaseSound(phase) {
 	audio.play().catch((err) => console.warn("Sound play failed:", err));
 }
 
-function maybePlayPhaseSound(previousState, newState) {
+function maybePlayPhaseSound(newState) {
+	if (!configs.settings.browserSourceSound) return;
 	if (!newState?.config?.browserSourceSound) return;
+	// A hidden OBS browser source freezes this page. Queued audio would then
+	// play when the scene is shown, seconds after the C# clock already moved on.
+	if (document.hidden) return;
 
-	const previousPhase = previousState?.phase;
-	const phaseChanged =
-		previousPhase != null && previousPhase !== newState.phase;
-	const sessionStarted = !previousState?.running && newState.running;
+	const startedAt = newState.phaseStartedAt;
+	if (startedAt == null) return;
 
-	if (!phaseChanged && !sessionStarted) return;
+	const soundKey = `${newState.phase}:${startedAt}`;
+	if (lastPlayedPhaseStart === soundKey) return;
+	if (Math.abs(Date.now() - startedAt) > PHASE_SOUND_GRACE_MS) return;
 
+	lastPlayedPhaseStart = soundKey;
 	playPhaseSound(newState.phase);
 }
 
@@ -100,7 +109,16 @@ function render() {
 
 function startTick() {
 	stopTick();
-	tickInterval = setInterval(render, 250);
+	let lastFrameAt = Date.now();
+	tickInterval = setInterval(() => {
+		const now = Date.now();
+		const wokeFromHidden = now - lastFrameAt > 1000;
+		lastFrameAt = now;
+		if (wokeFromHidden && typeof refreshTimerState === "function") {
+			refreshTimerState();
+		}
+		render();
+	}, 250);
 }
 
 function stopTick() {
@@ -110,17 +128,16 @@ function stopTick() {
 	}
 }
 
-function applyPomodoroState(newState, { silent = false } = {}) {
-	const previousState = state;
+function applyPomodoroState(newState) {
+	if (newState?.asOf != null && lastAsOf > newState.asOf) return;
+
+	if (newState?.asOf != null) lastAsOf = newState.asOf;
 	state = newState;
 	render();
-
-	if (!silent) {
-		maybePlayPhaseSound(previousState, newState);
-	}
+	maybePlayPhaseSound(newState);
 
 	if (state?.running && !state.paused) {
-		startTick();
+		if (!tickInterval) startTick();
 	} else {
 		stopTick();
 	}
