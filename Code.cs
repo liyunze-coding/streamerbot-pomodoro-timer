@@ -24,6 +24,12 @@ public class PomodoroConfig
     public string LongBreakSoundFilePath = "";
     public string EndSoundFilePath = "";
 
+    // Streamer.bot actions run on phase transitions (leave empty to skip)
+    public string WorkStartActionId = "3631a33a-25d7-46fb-a134-5b2ba18ccc13";
+    public string BreakStartActionId = "58fdf247-faab-40c9-8651-0f8650801913";
+    public string LongBreakStartActionId = "22aef312-66d1-4579-bc73-e6eb59743d5c";
+    public string TimerEndActionId = "49398044-2fdb-40b8-a953-cec60c22cce2";
+
     // Pre-work-end ad break (fires once per work phase when remaining time crosses the threshold)
     public bool EnablePreWorkEndAds = true;
     public int AdDurationSeconds = 180; // 30, 60, 90, 120, 150, or 180
@@ -205,6 +211,21 @@ public class PomodoroEngine
             if (!IsActive())
                 return new PomodoroResponse(true, $"🎯 Goal set to {config.TotalPomodoros} pomodoros.");
             return new PomodoroResponse(true, $"🎯 Goal updated! Now on pomodoro {currentPomodoro}/{config.TotalPomodoros}.");
+        }
+    }
+
+    public PomodoroResponse SetSession(int workMinutes, int breakMinutes)
+    {
+        lock (stateLock)
+        {
+            if (workMinutes < 1 || breakMinutes < 1)
+                return new PomodoroResponse(false, "❌ Work and break minutes must each be at least 1.");
+            config.WorkMinutes = workMinutes;
+            config.BreakMinutes = breakMinutes;
+            broadcast("setSession", GetSnapshot());
+            if (!IsActive())
+                return new PomodoroResponse(true, $"⚙️ Session set to {workMinutes}/{breakMinutes} (work/break minutes).");
+            return new PomodoroResponse(true, $"⚙️ Session set to {workMinutes}/{breakMinutes} — applies from the next phase.");
         }
     }
 
@@ -636,7 +657,8 @@ public class CPHInline
             CPH.PlaySound(config.WorkSoundFilePath);
         }
         
-        CPH.RunActionById("3631a33a-25d7-46fb-a134-5b2ba18ccc13");
+        if (!string.IsNullOrWhiteSpace(config.WorkStartActionId))
+            CPH.RunActionById(config.WorkStartActionId);
     }
 
     // Fired when a regular break starts.
@@ -649,7 +671,8 @@ public class CPHInline
         }
             
 
-        CPH.RunActionById("58fdf247-faab-40c9-8651-0f8650801913");
+        if (!string.IsNullOrWhiteSpace(config.BreakStartActionId))
+            CPH.RunActionById(config.BreakStartActionId);
     }
 
     // Fired when a long break starts.
@@ -661,7 +684,8 @@ public class CPHInline
             CPH.PlaySound(config.LongBreakSoundFilePath);
         }
 
-        CPH.RunActionById("22aef312-66d1-4579-bc73-e6eb59743d5c");
+        if (!string.IsNullOrWhiteSpace(config.LongBreakStartActionId))
+            CPH.RunActionById(config.LongBreakStartActionId);
     }
 
     // Fired when the full pomodoro run completes (all pomodoros done).
@@ -673,7 +697,8 @@ public class CPHInline
             CPH.PlaySound(config.EndSoundFilePath);
         }
 
-        CPH.RunActionById("49398044-2fdb-40b8-a953-cec60c22cce2");
+        if (!string.IsNullOrWhiteSpace(config.TimerEndActionId))
+            CPH.RunActionById(config.TimerEndActionId);
     }
 
     // Fired once per work phase when remaining time crosses ad duration.
@@ -723,8 +748,9 @@ public class CPHInline
     // Reads configuration from action arguments, falling back to PomodoroConfig defaults.
     // Set these as arguments on the Streamer.bot action to configure:
     //   workMinutes, breakMinutes, longBreakMinutes, longBreakEvery, totalPomodoros, noLastBreak,
-    //   enablePreWorkEndAds, adDurationSeconds, PreWorkEndActionId,
-    //   preBreakEndWarningSeconds
+    //   enablePreWorkEndAds, adDurationSeconds, PreWorkEndActionId, PreBreakEndActionId,
+    //   preBreakEndWarningSeconds, WorkStartActionId, BreakStartActionId,
+    //   LongBreakStartActionId, TimerEndActionId
     private static PomodoroConfig CopyConfig(PomodoroConfig source)
     {
         return new PomodoroConfig
@@ -740,6 +766,10 @@ public class CPHInline
             BreakSoundFilePath = source.BreakSoundFilePath,
             LongBreakSoundFilePath = source.LongBreakSoundFilePath,
             EndSoundFilePath = source.EndSoundFilePath,
+            WorkStartActionId = source.WorkStartActionId,
+            BreakStartActionId = source.BreakStartActionId,
+            LongBreakStartActionId = source.LongBreakStartActionId,
+            TimerEndActionId = source.TimerEndActionId,
             EnablePreWorkEndAds = source.EnablePreWorkEndAds,
             AdDurationSeconds = source.AdDurationSeconds,
             PreWorkEndActionId = source.PreWorkEndActionId,
@@ -777,6 +807,16 @@ public class CPHInline
             config.AdDurationSeconds = NormalizeAdDurationSeconds(adSeconds);
         if (CPH.TryGetArg("PreWorkEndActionId", out string PreWorkEndActionId) && !string.IsNullOrWhiteSpace(PreWorkEndActionId))
             config.PreWorkEndActionId = PreWorkEndActionId;
+        if (CPH.TryGetArg("PreBreakEndActionId", out string preBreakEndActionId) && !string.IsNullOrWhiteSpace(preBreakEndActionId))
+            config.PreBreakEndActionId = preBreakEndActionId;
+        if (CPH.TryGetArg("WorkStartActionId", out string workStartActionId) && !string.IsNullOrWhiteSpace(workStartActionId))
+            config.WorkStartActionId = workStartActionId;
+        if (CPH.TryGetArg("BreakStartActionId", out string breakStartActionId) && !string.IsNullOrWhiteSpace(breakStartActionId))
+            config.BreakStartActionId = breakStartActionId;
+        if (CPH.TryGetArg("LongBreakStartActionId", out string longBreakStartActionId) && !string.IsNullOrWhiteSpace(longBreakStartActionId))
+            config.LongBreakStartActionId = longBreakStartActionId;
+        if (CPH.TryGetArg("TimerEndActionId", out string timerEndActionId) && !string.IsNullOrWhiteSpace(timerEndActionId))
+            config.TimerEndActionId = timerEndActionId;
         if (CPH.TryGetArg("preBreakEndWarningSeconds", out string preBreakEndWarningSeconds) && int.TryParse(preBreakEndWarningSeconds, out int warnSeconds) && warnSeconds >= 0)
             config.PreBreakEndWarningSeconds = warnSeconds;
         return config;
@@ -910,6 +950,24 @@ public class CPHInline
         }
 
         var response = engine.SetGoal(goal);
+        Respond(response.Message);
+        return response.Success;
+    }
+
+    // Accepts "work/break" or "work:break" in minutes (e.g. 25/5 or 25:5).
+    public bool SetSessionCommand()
+    {
+        int work = 0, brk = 0;
+        string[] parts = CPH.TryGetArg("input0", out string input) && !string.IsNullOrWhiteSpace(input)
+            ? input.Trim().Split('/', ':')
+            : new string[0];
+        if (parts.Length != 2 || !int.TryParse(parts[0], out work) || !int.TryParse(parts[1], out brk))
+        {
+            Respond("❌ Usage: !timer session <work>/<break> (e.g. !timer session 25/5 or !timer session 25:5)");
+            return false;
+        }
+
+        var response = engine.SetSession(work, brk);
         Respond(response.Message);
         return response.Success;
     }
