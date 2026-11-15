@@ -17,6 +17,8 @@ public class PomodoroConfig
     public int LongBreakEvery = 3; // every Nth pomodoro the break is a long break
     public int TotalPomodoros = 5; // pomodoros (work sessions) per full run
     public bool NoLastBreak = true; // true = finish right after the last work session, no final break
+
+    // SOUNDS
     public bool BrowserSourceSound = true; // true = sound on browser source | false = sound on streamer.bot
 
     public string WorkSoundFilePath = "";
@@ -118,6 +120,7 @@ public class PomodoroEngine
             paused = false;
             EnterPhase(PomodoroPhase.Work);
             broadcast("start", GetSnapshot());
+            RaisePendingPhaseEvent();
             return new PomodoroResponse(true, $"🍅 Pomodoro started! Work session 1/{config.TotalPomodoros} ({config.WorkMinutes} min). Let's get it!");
         }
     }
@@ -355,12 +358,19 @@ public class PomodoroEngine
         {
             ScheduleTimer(currentPhaseDurationMs);
         }
-        RaisePhaseStartEvent(newPhase);
+        pendingPhaseEvent = newPhase;
     }
 
-    private void RaisePhaseStartEvent(PomodoroPhase newPhase)
+    // Phase events are deferred so actions run after the phase change is broadcast.
+    private PomodoroPhase? pendingPhaseEvent;
+
+    private void RaisePendingPhaseEvent()
     {
-        switch (newPhase)
+        if (pendingPhaseEvent == null)
+            return;
+        var p = pendingPhaseEvent.Value;
+        pendingPhaseEvent = null;
+        switch (p)
         {
             case PomodoroPhase.Work:
                 onWorkStart();
@@ -370,6 +380,9 @@ public class PomodoroEngine
                 break;
             case PomodoroPhase.LongBreak:
                 onLongBreakStart();
+                break;
+            case PomodoroPhase.Finished:
+                onTimerEnd();
                 break;
         }
     }
@@ -437,7 +450,7 @@ public class PomodoroEngine
         phaseEndsAt = DateTime.MinValue;
         phaseStartedAtUtc = DateTime.UtcNow;
         currentPhaseDurationMs = 0;
-        onTimerEnd();
+        pendingPhaseEvent = PomodoroPhase.Finished;
         persistTimerStatus(GetSnapshot());
     }
 
@@ -550,6 +563,7 @@ public class PomodoroEngine
 
         AdvancePhase();
         broadcast(phase == PomodoroPhase.Finished ? "finish" : "phaseChange", GetSnapshot());
+        RaisePendingPhaseEvent();
     }
 
 #endregion
